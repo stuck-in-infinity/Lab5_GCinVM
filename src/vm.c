@@ -52,6 +52,46 @@ Obj* new_pair(VM* vm, Value head, Value tail) {
     return (Obj*)pair;
 }
 
+void mark_value(VM* vm, Value v);
+
+static void mark_object(VM* vm, Obj* obj) {
+    
+  if (obj == NULL || obj->marked) return;
+
+    obj->marked = true;
+
+ 
+    if (obj->type == OBJ_PAIR) {
+        ObjPair* pair = (ObjPair*)obj;
+        mark_value(vm, pair->head);
+        mark_value(vm, pair->tail);
+    }
+}
+
+
+void mark_value(VM* vm, Value v) {
+    if (IS_OBJ(v)) {
+        mark_object(vm, AS_OBJ(v));
+    }
+}
+
+static void mark_roots(VM* vm) {
+  
+    for (int i = 0; i < vm->sp; i++) {
+        mark_value(vm, vm->stack[i]);
+    }
+
+  
+    for (int i = 0; i < MEM_SIZE; i++) {
+        mark_value(vm, vm->memory[i]);
+    }
+}
+
+//The entry point of the Garbage Collector
+void gc(VM* vm) {
+    mark_roots(vm);
+    
+}
 
 void vm_init(VM *vm) {
   vm->sp = vm->pc = vm->csp = 0;
