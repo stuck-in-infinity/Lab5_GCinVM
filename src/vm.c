@@ -1,13 +1,12 @@
 #include "vm.h"
-#include "opcode.h"
+#include "opcode.h" 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
-// --- Stack Operations ---
 
-static Value pop(VM *vm) {
+Value pop(VM *vm) {
   if (vm->sp <= 0) {
     fprintf(stderr, "Error: Stack Underflow\n");
     vm->error = 1;
@@ -17,7 +16,7 @@ static Value pop(VM *vm) {
   return vm->stack[--vm->sp];
 }
 
-static void push(VM *vm, Value v) {
+void push(VM *vm, Value v) {
   if (vm->sp >= STACK_SIZE) {
     fprintf(stderr, "Error: Stack Overflow\n");
     vm->error = 1;
@@ -27,9 +26,20 @@ static void push(VM *vm, Value v) {
   vm->stack[vm->sp++] = v;
 }
 
-// --- GC & Allocator ---
+// GC & Allocator
 
 static Obj* allocateObj(VM* vm, size_t size, ObjType type) {
+    if (vm->numObjects >= vm->maxObjects) {
+        #ifdef DEBUG_GC
+        printf("Max objects reached, triggering GC...\n");
+        #endif
+        gc(vm);
+        
+        if (vm->numObjects >= vm->maxObjects) {
+            vm->maxObjects *= 2;
+        }
+    }
+
     Obj* object = (Obj*)malloc(size);
     if (object == NULL) {
         fprintf(stderr, "Fatal: Heap Allocation Failed\n");
@@ -53,22 +63,63 @@ Obj* new_pair(VM* vm, Value head, Value tail) {
     return (Obj*)pair;
 }
 
-void mark_value(VM* vm, Value v);
+ObjFunction* new_function(VM* vm) {
+    ObjFunction* func = (ObjFunction*)allocateObj(vm, sizeof(ObjFunction), OBJ_FUNCTION);
+    func->arity = 0;
+    return func;
+}
+
+ObjClosure* new_closure(VM* vm, ObjFunction* func, Obj* upvalues) {
+    ObjClosure* closure = (ObjClosure*)allocateObj(vm, sizeof(ObjClosure), OBJ_CLOSURE);
+    closure->function = func;
+    closure->upvalues = upvalues;
+    return closure;
+}
+
+// Mark-Sweep
 
 static void mark_object(VM* vm, Obj* obj) {
     if (obj == NULL || obj->marked) return;
 
     obj->marked = true;
 
-    if (obj->type == OBJ_PAIR) {
-        ObjPair* pair = (ObjPair*)obj;
-        mark_value(vm, pair->head);
-        mark_value(vm, pair->tail);
+    if (vm->grayCapacity < vm->grayCount + 1) {
+        vm->grayCapacity = vm->grayCapacity < 8 ? 8 : vm->grayCapacity * 2;
+        vm->grayStack = (Obj**)realloc(vm->grayStack, sizeof(Obj*) * vm->grayCapacity);
     }
+    
+    vm->grayStack[vm->grayCount++] = obj;
 }
 
 void mark_value(VM* vm, Value v) {
     if (IS_OBJ(v)) mark_object(vm, AS_OBJ(v));
+}
+
+static void blacken_object(VM* vm, Obj* obj) {
+    switch (obj->type) {
+        case OBJ_PAIR: {
+            ObjPair* pair = (ObjPair*)obj;
+            mark_value(vm, pair->head);
+            mark_value(vm, pair->tail);
+            break;
+        }
+        case OBJ_CLOSURE: {
+            ObjClosure* closure = (ObjClosure*)obj;
+            mark_object(vm, (Obj*)closure->function);
+            mark_object(vm, closure->upvalues);
+            break;
+        }
+        case OBJ_FUNCTION: {
+            break;
+        }
+    }
+}
+
+static void trace_references(VM* vm) {
+    while (vm->grayCount > 0) {
+        Obj* obj = vm->grayStack[--vm->grayCount];
+        blacken_object(vm, obj);
+    }
 }
 
 static void mark_roots(VM* vm) {
@@ -92,12 +143,30 @@ static void sweep(VM* vm) {
     }
 }
 
+
 void gc(VM* vm) {
+    vm->gc_run_count++; 
+    
+    int objectsBefore = vm->numObjects;
+    
     mark_roots(vm);
+    trace_references(vm); 
     sweep(vm);
+
+    int objectsAfter = vm->numObjects;
+    int objectsFreed = objectsBefore - objectsAfter;
+    
+    vm->total_freed += objectsFreed;
+
+    // Only print if flag is true
+    if (vm->debug_gc && objectsFreed > 0) {
+        printf("[GC] Cycle %d: Collected %d objects (from %d to %d)\n", 
+               vm->gc_run_count, objectsFreed, objectsBefore, objectsAfter);
+    }
+    
 }
 
-// --- VM Implementation ---
+// VM Implementation
 
 void vm_init(VM *vm) {
   vm->sp = vm->pc = vm->csp = 0;
@@ -108,12 +177,33 @@ void vm_init(VM *vm) {
 
   vm->objects = NULL;
   vm->numObjects = 0;
-  vm->maxObjects = 100; 
+  vm->maxObjects = 100; // Threshold
+
+  vm->grayCount = 0;
+  vm->grayCapacity = 0;
+  vm->grayStack = NULL;
+
+  vm->debug_gc = false;      // Default we donot print each object's status
+  vm->total_freed = 0;
+  vm->gc_run_count = 0;
 
   memset(vm->stack, 0, sizeof(vm->stack));
   memset(vm->memory, 0, sizeof(vm->memory));
   memset(vm->callstack, 0, sizeof(vm->callstack));
   memset(vm->code, 0, sizeof(vm->code));
+}
+
+void vm_free(VM *vm) {
+    
+    if (vm->grayStack) free(vm->grayStack);
+    
+    // Free all objects
+    Obj* current = vm->objects;
+    while (current) {
+        Obj* next = current->next;
+        free(current);
+        current = next;
+    }
 }
 
 void vm_load(VM *vm, const char *filename) {
